@@ -1,0 +1,116 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: after_sales
+      MYSQL_USER: after_sales
+      MYSQL_PASSWORD: after_sales_dev
+      MYSQL_ROOT_PASSWORD: root_dev_only
+    ports: ["3306:3306"]
+    volumes: ["mysql_data:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot_dev_only"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis/redis-stack-server:latest
+    ports: ["6379:6379"]
+    volumes: ["redis_data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio_data:/data"]
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+    volumes: ["etcd_data:/etcd"]
+
+  milvus:
+    image: milvusdb/milvus:v2.6.4
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+    ports: ["19530:19530", "9091:9091"]
+    volumes: ["milvus_data:/var/lib/milvus"]
+    depends_on: [etcd, minio]
+
+  backend:
+    build: .
+    environment:
+      DATABASE_URL: mysql+pymysql://after_sales:after_sales_dev@mysql:3306/after_sales?charset=utf8mb4
+      REDIS_URL: redis://redis:6379
+      USE_REDIS_CHECKPOINT: "true"
+      TOOL_TRANSPORT: mcp
+      MCP_SERVER_URL: http://mcp-tools:8002/mcp
+      POLICY_DIR: /app/data/policies
+      RAG_BACKEND: milvus
+      MILVUS_URI: http://milvus:19530
+      MILVUS_TOKEN: root:Milvus
+      KNOWLEDGE_TENANT_ID: demo
+      LLM_ENABLED: "false"
+      LLM_BASE_URL: http://host.docker.internal:8001/v1
+      LLM_MODEL: Qwen/Qwen3-8B-Instruct
+      MINIO_ENABLED: "true"
+      MINIO_ENDPOINT: http://minio:9000
+      AUTH_ENABLED: "true"
+      JWT_SECRET: docker-dev-secret-change-in-production-32bytes
+    ports: ["8000:8000"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      mcp-tools: { condition: service_started }
+      milvus: { condition: service_started }
+
+  mcp-tools:
+    build: .
+    command: ["python", "-m", "app.mcp_server"]
+    environment:
+      DATABASE_URL: mysql+pymysql://after_sales:after_sales_dev@mysql:3306/after_sales?charset=utf8mb4
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: 8002
+    ports: ["8002:8002"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  migrate:
+    build: .
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: mysql+pymysql://after_sales:after_sales_dev@mysql:3306/after_sales?charset=utf8mb4
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  frontend:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [backend]
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  etcd_data:
+  milvus_data:

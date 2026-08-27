@@ -1,0 +1,4 @@
+Database migrations are the only supported production schema upgrade path.
+
+Create a revision with `python -m alembic revision --autogenerate -m "message"`.
+Apply migrations with `python -m alembic upgrade head` before starting application workers.
